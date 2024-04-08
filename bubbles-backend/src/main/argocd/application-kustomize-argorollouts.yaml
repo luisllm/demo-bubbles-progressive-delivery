@@ -2,7 +2,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: bubbles-backend
-  namespace: openshift-gitops # change to argocd if using minikube
+  namespace: argocd
 spec:
   destination:
     namespace: bubbles-argorollouts
@@ -10,7 +10,7 @@ spec:
   project: default 
   source: 
     path: bubbles-backend/src/main/argorollouts
-    repoURL: https://github.com/redhat-developer-demos/bubbles-progressive-delivery.git
+    repoURL: https://github.com/luisllm/demo-bubbles-progressive-delivery.git
     targetRevision: main
   syncPolicy: 
     automated:
