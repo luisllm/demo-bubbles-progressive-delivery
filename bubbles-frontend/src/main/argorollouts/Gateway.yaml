@@ -6,7 +6,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "3"
 spec:
   selector:
-    istio: ingressgateway # use istio default controller
+    istio: app-ingressgateway
   servers:
   - port:
       number: 80
