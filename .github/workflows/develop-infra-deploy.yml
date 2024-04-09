@@ -429,12 +429,16 @@ jobs:
             --values custom-kiali-values.yaml
 
       # Expose Kiali via the Istio IG dedicated to the UIs
-      - name: Expose Prometheus and Kiali via Istio IG
+      - name: Expose Kiali via Istio IG
         run: |
-          kubectl apply -f prometheus-istio-gateway.yaml 
-          kubectl apply -f prometheus-istio-virtualservice.yaml
           kubectl apply -f kiali-istio-gateway.yaml 
           kubectl apply -f kiali-istio-virtualservice.yaml
+
+      # Exposing Prometheus does not work
+      #- name: Expose Prometheus via Istio IG
+      #  run: |
+      #    kubectl apply -f prometheus-istio-gateway.yaml 
+      #    kubectl apply -f prometheus-istio-virtualservice.yaml
 
 
 
