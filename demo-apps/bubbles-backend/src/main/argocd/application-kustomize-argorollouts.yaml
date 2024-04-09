@@ -9,7 +9,7 @@ spec:
     server: https://kubernetes.default.svc 
   project: default 
   source: 
-    path: bubbles-backend/src/main/argorollouts
+    path: demo-apps/bubbles-backend/src/main/argorollouts
     repoURL: https://github.com/luisllm/demo-bubbles-progressive-delivery.git
     targetRevision: main
   syncPolicy: 

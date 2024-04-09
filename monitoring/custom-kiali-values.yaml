@@ -1,0 +1,104 @@
+#allowAdHocKialiImage: true
+#onlyViewOnlyMode: true
+cr:
+  create: true
+  #namespace: istio-system
+  namespace: monitoring
+  spec:
+    external_services:
+      grafana:
+        auth:
+          ca_file: ""
+          insecure_skip_verify: false
+          password: prom-operator
+          token: ""
+          type: "basic"
+          use_kiali_token: false
+          username: admin
+        dashboards:
+        - name: Istio Service Dashboard
+          variables:
+            namespace: var-namespace
+            service: var-service
+        - name: Istio Workload Dashboard
+          variables:
+            namespace: var-namespace
+            workload: var-workload
+        enabled: true
+        in_cluster_url: http://mon-grafana.monitoring.svc.cluster.local/
+        url: http://mon-grafana.monitoring.svc.cluster.local/
+
+      istio:
+        istio_sidecar_annotation: sidecar.istio.io/status
+        istio_status_enabled: true
+        #url_service_version: http://istiod:15014/version
+        url_service_version: http://istiod.istio-system.svc.cluster.local:15014/version
+
+        component_status:
+          components:
+          - app_label: "istiod"
+            is_core: true
+            is_proxy: false
+
+          - app_label: "app-ingressgateway"
+            is_core: true
+            is_proxy: true
+            # default: namespace is undefined
+            namespace: istio-ingress
+
+          - app_label: "argo-ingressgateway"
+            is_core: true
+            is_proxy: true
+            # default: namespace is undefined
+            namespace: istio-ingress
+
+          enabled: true
+
+      prometheus:
+        auth:
+          ca_file: ""
+          insecure_skip_verify: false
+          password: ""
+          token: ""
+          type: none
+          use_kiali_token: false
+          username: ""
+        custom_metrics_url: http://mon-kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/
+        url: http://mon-kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/
+
+      tracing:
+        auth:
+          ca_file: ""
+          insecure_skip_verify: false
+          password: ""
+          token: ""
+          type: none
+          use_kiali_token: false
+          username: ""
+        #enabled: true
+        enabled: false
+        in_cluster_url: http://tracing.monitoring.svc.cluster.local
+        namespace_selector: true
+        url: http://tracing.monitoring.svc.cluster.local
+        whitelist_istio_system:
+        - jaeger-query
+        - app-ingressgateway
+        - argo-ingressgateway
+
+    identity:
+      cert_file: ""
+      private_key_file: ""
+    istio_namespace: istio-system
+    #istio_namespace: monitoring
+    login_token:
+      signing_key: CHANGEME
+    server:
+      metrics_enabled: true
+      metrics_port: 9090
+      port: 20001
+      web_root: /kiali
+    # Default namespace selection
+    kiali_feature_flags:
+      ui_defaults:
+        namespaces:
+        - demo

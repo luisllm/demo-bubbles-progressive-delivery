@@ -1,0 +1,7 @@
+clusterName: CLUSTER_NAME_CHANGEME
+
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: IAM_ROLE_ARN_CHANGEME
+replicaCount: 1

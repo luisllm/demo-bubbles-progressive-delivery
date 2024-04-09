@@ -1,0 +1,450 @@
+name: "staging - Deploy infra"
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize]
+    paths-ignore:
+      - 'README.md'
+  workflow_dispatch:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+  #issues: write
+
+env:
+  # Possible values: https://developer.hashicorp.com/terraform/internals/debugging
+  TF_LOG: INFO
+  # Credentials for deployment to AWS
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  # S3 bucket for the Terraform state
+  S3_BUCKET_TF_STATE: "staging-test-llm-terraform-state"
+  TF_STATE_FILE: "vpc-eks.tfstate"
+  AWS_REGION: "us-east-1"
+  TERRAFORM_VERSION: "1.7.0"
+  ENVIRONMENT: staging
+  EKS_CLUSTER_NAME: staging-eks-cluster
+  AWS_LOAD_BALANCER_CONTROLLER_CHART_VERSION: "1.7.2"
+  ISTIO_CHART_VERSION: "1.20.0"
+
+jobs:
+  # Deploy the VPC and the EKS cluster
+  deploy_vpc_and_eks:
+    name: "Deploy VPC and EKS cluster"
+    runs-on: ubuntu-latest
+    #environment: $ENVIRONMENT
+    defaults:
+      run:
+        working-directory: terraform-code/vpc-eks
+    outputs:
+      tfplanExitCode: ${{ steps.tf-plan.outputs.exitcode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "us-east-1"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: $TERRAFORM_VERSION
+      
+      - name: Install checkov
+        run: pip install checkov    
+
+      - name: Terraform Format
+        run: terraform fmt
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config "bucket=$S3_BUCKET_TF_STATE" \
+            -backend-config "key=$TF_STATE_FILE"
+
+      - name: Terraform Validate
+        run: terraform validate -no-color
+
+      - name: Fetch variable file infra.tfvars from CONFIG REPO
+        uses: actions/checkout@v2
+        with:
+          repository: "luisllm/environments"
+          ref: staging # or specify the branch, tag, or commit hash where the file resides
+          path: "./environments"
+      
+      - name: Print variable file infra.tfvars coming from CONFIG REPO
+        run: cat ../../environments/tf-config/infra.tfvars
+         
+      # Generates an execution plan for Terraform
+      # An exit code of 0 indicated no changes, 1 a terraform failure, 2 there are pending changes.
+      - name: Terraform Plan
+        id: tf-plan
+        run: |
+          export exitcode=0
+          terraform plan -var-file="../../environments/tf-config/infra.tfvars" -detailed-exitcode -no-color -out tfplan || export exitcode=$?
+
+          echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
+          if [ $exitcode -eq 1 ]; then
+            echo Terraform Plan Failed!
+            exit 1
+          else 
+            exit 0
+          fi
+
+      - name: Run checkov
+        run: checkov -d . --quiet --soft-fail
+
+      # Terraform Apply
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+      # Notify to Slack channel if it fails
+      #- name: Notify slack fail
+      #    if: failure()
+      #    env:
+      #      SLACK_BOT_TOKEN: ${{ secrets.SLACK_NOTIFICATIONS_BOT_TOKEN }}
+      #    uses: voxmedia/github-action-slack-notify-build@v1
+      #    with:
+      #      channel: app-alerts
+      #      status: FAILED
+      #      color: danger
+
+
+
+
+  # Deploy aws-load-balancer-controller in EKS
+  # https://github.com/kubernetes-sigs/aws-load-balancer-controller/tree/main
+  aws_load_balancer_controller_deployment:
+    name: "Deploy aws-load-balancer-controller"
+    runs-on: ubuntu-latest
+    #environment: $ENVIRONMENT
+    defaults:
+      run:
+        working-directory: aws-load-balancer-controller
+    needs: [deploy_vpc_and_eks]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "us-east-1"
+
+      # Get from AWS ParameterStore the aws-load-balancer-controller IAM Role that needs to be passed to the values.yaml file, to be linked to the ServiceAccount
+      # The IAM Role was created by Terraform
+      - name: Get IAM Role from ParameterStore
+        id: discover-lb-secgroup
+        run: |
+          iam_role_arn=$(aws ssm get-parameter --name "/$ENVIRONMENT/aws-load-balancer-controller-iam-role-arn" --query 'Parameter.Value' --output text)
+          echo "IAM_ROLE_ARN=$iam_role_arn" >>$GITHUB_ENV
+
+      - name: Customize values file
+        run: |       
+          sed "s|IAM_ROLE_ARN_CHANGEME|$IAM_ROLE_ARN|g" aws-load-ballancer-controller-values.yaml > aws-load-ballancer-controller-values-temp.yaml
+          sed "s|CLUSTER_NAME_CHANGEME|$EKS_CLUSTER_NAME|g" aws-load-ballancer-controller-values-temp.yaml > aws-load-ballancer-controller-values-replaced.yaml
+          cat aws-load-ballancer-controller-values-replaced.yaml
+
+      - name: Update kube config
+        run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME
+
+      # https://artifacthub.io/packages/helm/aws/aws-load-balancer-controller
+      - name: Deploy aws-load-balancer-controller
+        run: |
+          helm repo add eks https://aws.github.io/eks-charts
+          helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+            --namespace kube-system \
+            --version $AWS_LOAD_BALANCER_CONTROLLER_CHART_VERSION \
+            --values aws-load-ballancer-controller-values-replaced.yaml
+
+
+
+
+  # Deploy Istio
+  istio_deployment:
+    name: "Deploy Istio"
+    runs-on: ubuntu-latest
+    #environment: $ENVIRONMENT
+    defaults:
+      run:
+        working-directory: istio
+    needs: [deploy_vpc_and_eks, aws_load_balancer_controller_deployment]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "us-east-1"
+
+      # Get from AWS ParameterStore the SecGroup ID that should be attached to the public AWS LB
+      # The SecGroup was created by Terraform
+      - name: Get SecGroups from ParameterStore
+        run: |
+          app_lb_secgroup_id=$(aws ssm get-parameter --name "/$ENVIRONMENT/app-public-lb-secgroup-id" --query 'Parameter.Value' --output text)
+          echo "APP_LB_SECGROUP_ID=$app_lb_secgroup_id" >>$GITHUB_ENV
+          argo_secgroup_id=$(aws ssm get-parameter --name "/$ENVIRONMENT/argo-public-lb-secgroup-id" --query 'Parameter.Value' --output text)
+          echo "ARGO_SECGROUP_ID=$argo_secgroup_id" >>$GITHUB_ENV
+
+      # Get from AWS ParameterStore the list of public subnets
+      - name: Get public subnets from ParameterStore
+        run: |
+          public_subnets=$(aws ssm get-parameter --name "/$ENVIRONMENT/public-subnets" --query 'Parameter.Value' --output text)
+          echo "PUBLIC_SUBNETS=$public_subnets" >>$GITHUB_ENV
+
+      - name: Customize values file
+        run: |       
+          sed "s|PUBLIC_SUBNETS_CHANGEME|$PUBLIC_SUBNETS|g" app-istio-ingress-values.yaml > app-istio-ingress-values-temp.yaml
+          sed "s|PUBLIC_SG_ID_CHANGEME|$APP_LB_SECGROUP_ID|g" app-istio-ingress-values-temp.yaml > app-istio-ingress-values-replaced.yaml
+          cat app-istio-ingress-values-replaced.yaml
+          sed "s|PUBLIC_SUBNETS_CHANGEME|$PUBLIC_SUBNETS|g" argo-istio-ingress-values.yaml > argo-istio-ingress-values-temp.yaml
+          sed "s|PUBLIC_SG_ID_CHANGEME|$ARGO_SECGROUP_ID|g" argo-istio-ingress-values-temp.yaml > argo-istio-ingress-values-replaced.yaml
+          cat argo-istio-ingress-values-replaced.yaml
+
+      - name: Update kube config
+        run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME
+
+      # https://istio.io/latest/docs/setup/install/helm/
+      # https://artifacthub.io/packages/helm/istio-official/base
+      # https://artifacthub.io/packages/helm/istio-official/istiod
+      - name: Deploy istio base and istiod
+        run: |
+          helm repo add istio https://istio-release.storage.googleapis.com/charts
+          helm repo update
+          kubectl get namespace | grep -q "^istio-system" || kubectl create namespace istio-system
+          helm upgrade --install istio-base istio/base \
+            --version $ISTIO_CHART_VERSION \
+            -n istio-system \
+            --set defaultRevision=$ISTIO_CHART_VERSION
+          helm upgrade --install istiod istio/istiod \
+            --version $ISTIO_CHART_VERSION \
+            -n istio-system \
+            --values istio-istiod-values.yaml
+      
+      # https://artifacthub.io/packages/helm/istio-official/gateway
+      - name: Deploy app istio ingress gateway
+        run: |
+          kubectl get namespace | grep -q "^istio-ingress" || kubectl create namespace istio-ingress
+          helm upgrade --install public-app-istio-ingress istio/gateway \
+            --version $ISTIO_CHART_VERSION \
+            -n istio-ingress \
+            --values app-istio-ingress-values-replaced.yaml
+
+      # https://artifacthub.io/packages/helm/istio-official/gateway
+      - name: Deploy Argo istio ingress gateway
+        run: |
+          helm upgrade --install public-argo-istio-ingress istio/gateway \
+            --version $ISTIO_CHART_VERSION \
+            -n istio-ingress \
+            --values argo-istio-ingress-values-replaced.yaml
+
+
+
+  # Deploy Argocd
+  argocd_deployment:
+    name: "Deploy ArgoCD"
+    runs-on: ubuntu-latest
+    #environment: $ENVIRONMENT
+    defaults:
+      run:
+        working-directory: argocd
+    needs: [istio_deployment]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "us-east-1"
+
+      - name: Update kube config
+        run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME
+
+      - name: Create argocd namespace
+        run: |
+          kubectl get namespace | grep -q "^argocd" || kubectl create namespace argocd
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+      # Patch ArgoCD to be able to access the ArgoCD UI via the AWS public LB and the nginx ingress controller
+      # https://arnavtripathy98.medium.com/solution-how-to-deploy-argo-cd-dashboard-over-nginx-ingress-controller-926d8a540844
+      - name: Patch Argocd
+        run: |
+          kubectl -n argocd patch configmap argocd-cmd-params-cm --patch '{"data":{"server.insecure":"true"}}'
+          kubectl -n argocd rollout restart deployment argocd-server
+
+      - name: Expose ArgoCD UI via the AWS public NLB and the public Istio IG 
+        run: |
+          kubectl apply -f argo-istio-gateway.yaml
+          kubectl apply -f argo-istio-vs.yaml
+
+      - name: ArgoCD admin password
+        run: |
+          echo "Run the following command to get the ArgoCD admin password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo"
+
+
+  # https://www.youtube.com/watch?v=17894DTru2Y&list=PLTiQErIEf8SZsSwdDqITSPJvMDBGVJX-d&index=2&t=736s
+  # Deploy ArgoCD Project and Applications
+  argocd_project_and_apps_deployment:
+    name: "Deploy ArgoCD Project and Applications"
+    runs-on: ubuntu-latest
+    #environment: $ENVIRONMENT
+    defaults:
+      run:
+        working-directory: argocd
+    needs: [argocd_deployment]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "us-east-1"
+
+      - name: Update kube config
+        run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME
+
+      - name: Create ecommerge and demo namespaces
+        run: |
+          kubectl get namespace | grep -q "^ecommerce" || kubectl create namespace ecommerce
+          kubectl label ns ecommerce istio-injection=enabled
+          kubectl get namespace | grep -q "^demo" || kubectl create namespace demo
+          kubectl label ns demo istio-injection=enabled
+
+      - name: Customize ArgoCD app with environment
+        run: |   
+          sed "s|ENVIRONMENT_CHANGEME|$ENVIRONMENT|g" argocd-products-app.yaml > argocd-products-app-replaced.yaml
+          cat argocd-products-app-replaced.yaml
+          sed "s|ENVIRONMENT_CHANGEME|$ENVIRONMENT|g" argocd-orders-app.yaml > argocd-orders-app-replaced.yaml
+          cat argocd-orders-app-replaced.yaml
+          sed "s|ENVIRONMENT_CHANGEME|$ENVIRONMENT|g" argocd-graphql-app.yaml > argocd-graphql-app-replaced.yaml
+          cat argocd-graphql-app-replaced.yaml    
+          sed "s|ENVIRONMENT_CHANGEME|$ENVIRONMENT|g" argocd-podinfo-app.yaml > argocd-podinfo-app-replaced.yaml
+          cat argocd-podinfo-app-replaced.yaml
+
+      - name: Create ArgoCD Project and Applications
+        run: |
+          kubectl apply -f argocd-ecommerce-project.yaml
+          kubectl apply -f argocd-products-app-replaced.yaml
+          kubectl apply -f argocd-orders-app-replaced.yaml
+          kubectl apply -f argocd-graphql-app-replaced.yaml
+          kubectl apply -f argocd-podinfo-project.yaml
+          kubectl apply -f argocd-podinfo-app-replaced.yaml
+
+
+  # Store in AWS ParameterStore the public LB dns name created automatically when the Istio ingress gateway was deployed. It will be used to send requests
+  public_ingress_lb_discovery:
+    name: "Store ingress AWS public LB dns name in AWS ParameterStore"
+    runs-on: ubuntu-latest
+    #environment: $ENVIRONMENT
+    needs: [istio_deployment]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "us-east-1"
+
+      # Wait for 1min for the LB to get created
+      - name: Wait for 1 Minute
+        run: sleep 60
+
+      - name: Discover ingress public LB DNS Name and store it in AWS ParameterStore
+        id: discover-lb-dns
+        run: |
+          # Get the list of load balancer names
+          load_balancer_arns=$(aws elbv2 describe-load-balancers --query "LoadBalancers[].LoadBalancerArn" --output text)
+          
+          # Iterate over each load balancer arn
+          for lb_arn in $load_balancer_arns; do
+            # Fetch the tags for the NLB
+            tags=$(aws elbv2 describe-tags --resource-arns "$lb_arn" --output json)
+            
+            # Extract the values of the tags meeting both conditions
+            filtered_tags=$(echo "$tags" | jq -r --arg EKS_CLUSTER_NAME "$EKS_CLUSTER_NAME" '.TagDescriptions[].Tags | map(select(.Key == "service.k8s.aws/stack" and .Value == "istio-ingress/public-app-istio-ingress" or .Key == "elbv2.k8s.aws/cluster" and .Value == $EKS_CLUSTER_NAME)) | .[].Value')
+            echo "$filtered_tags"
+
+            # Check if both tags were found
+            if [ $(echo "$filtered_tags" | wc -l) -eq 2 ]; then
+                # Both tags were found, retrieve the NLB DNS name
+                ingress_lb_dns_name=$(aws elbv2 describe-load-balancers --load-balancer-arns "$lb_arn" --query "LoadBalancers[].DNSName" --output text)
+                echo "NLB DNS Name: $ingress_lb_dns_name"
+                aws ssm put-parameter --name "/$ENVIRONMENT/ingress-public-load-balancer-dns" --value "$ingress_lb_dns_name" --type String --overwrite
+            else
+                # Both tags were not found, do nothing or add error handling
+                echo "Both tags were not found."
+            fi
+          done
+
+
+  tests:
+    name: "Tests"
+    runs-on: ubuntu-latest
+    #environment: $ENVIRONMENT
+    needs: [argocd_project_and_apps_deployment, public_ingress_lb_discovery]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "us-east-1"
+
+      - name: Update kube config
+        run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME
+
+      # Wait for 1min for the app POD and Istio Ingress Gateway and AWS NLB to start up
+      - name: Wait for 30 seconds
+        run: sleep 30
+
+      - name: Check all Istio IG and podinfo PODs are running
+        run: |
+          kubectl get pods -n istio-ingress -l istio=app-ingressgateway -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' | grep -qv "Running" && echo "One or more pods are not in running state" && exit 1 || echo "All pods are running"
+          kubectl get pods -n demo -l app.kubernetes.io/name=podinfo -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' | grep -qv "Running" && echo "One or more pods are not in running state" && exit 1 || echo "All pods are running"
+
+      # Get from AWS ParameterStore the public LB dns name created automatically when the Istio Ingress Gateway was deployed. It will be used to send requests
+      - name: Get AWS public LB DNS Name from ParameterStore
+        run: |
+          ingress_lb_dns=$(aws ssm get-parameter --name "/$ENVIRONMENT/ingress-public-load-balancer-dns" --query 'Parameter.Value' --output text)
+          echo "INGRESS_LB_DNS=$ingress_lb_dns" >>$GITHUB_ENV
+
+      - name: Send test request
+        run: |
+          # Send request
+          response_http_status_code=$(curl -s -o /dev/null -w "%{http_code}" -X GET \
+            --max-time 10 \
+            http://$INGRESS_LB_DNS/playground)
+         
+          echo "response_http_status: $response_http_status_code"
+          if [ "$response_http_status_code" -eq "200" ]; then
+            echo "OK"
+          else
+            echo "NOK"
+            exit 1
+          fi

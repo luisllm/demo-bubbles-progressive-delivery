@@ -1,0 +1,37 @@
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+service:
+  ports:
+    - name: http-argo-ingress
+      protocol: TCP
+      port: 80
+      targetPort: 80
+  #externalTrafficPolicy: Local
+
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    #service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags: "environment={{environment_name}}-{{ blue_green }}, Name={{environment_name}}-{{ blue_green }}-nlb-istio-ingress, lab_name={{environment_name}}"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "instance"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+    #service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "{{ lookup ('aws_ssm', '/opf/{{ environment_name }}/blue_green_lb_certificate_arn', region=aws_region) }}"
+    #service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "http-ingress-https"
+    #external-dns.alpha.kubernetes.io/hostname: "nginx-{{ blue_green }}.{{environment_name}}.{{ lookup('aws_ssm', '/opf/{{ environment_name }}/transfer_hostedzone_name', region=aws_region) }}"
+    #service.beta.kubernetes.io/aws-load-balancer-subnets: "{{ lookup ('aws_ssm', '/opf/{{ environment_name }}/{{ blue_green }}/istio_ingress_public_subnet_id', region=aws_region) }}"
+    service.beta.kubernetes.io/aws-load-balancer-subnets: PUBLIC_SUBNETS_CHANGEME
+    #service.beta.kubernetes.io/aws-load-balancer-access-log-enabled: "true"
+    #service.beta.kubernetes.io/aws-load-balancer-access-log-emit-interval: "60"
+    #service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-name: "{{ environment_name }}-vpc-nlb-access-logs-{{ environment_name }}-nagra"
+    #service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-prefix: "{{ environment_name }}-pub-istio-ingressgateway"
+    #New 2 annotations added in 23Q4 when we introduced the new SecGroup attached to the public NLB
+    #https://dev.to/aws-builders/creating-network-load-balancer-sg-supported-with-aws-load-balancer-controller-168p
+    service.beta.kubernetes.io/aws-load-balancer-security-groups: PUBLIC_SG_ID_CHANGEME
+    service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+
+labels:
+  app: argo-ingressgateway
+  istio: argo-ingressgateway
