@@ -21,13 +21,13 @@ Demo that does the following:
 # Access the UIs:
 
 To access ArgoCD and Kiali UIs:
-http://<ISTIO_IG_ARGO>/
-http://<ISTIO_IG_ARGO>/kiali
+- http://<ISTIO_IG_ARGO>/
+- http://<ISTIO_IG_ARGO>/kiali
 
 ![image argocd](./images/argocd.jpg)
 
 To access the app:
-http://<ISTIO_IG_APP>/
+- http://<ISTIO_IG_APP>/
 
 
 # Steps to test the Canary
@@ -38,6 +38,7 @@ kubectl argo rollouts get rollout bubblebackend --namespace bubbles-argorollouts
 ```
 
 Go ahead and change the color config. Commit and push the changes. ArgoCD will realize about the change and apply it:
+![image change](./images/change.jpg)
 
 Check Kiali:
 ![image kiali](./images/kiali.jpg)
@@ -70,7 +71,7 @@ TOTAL PER DAY: $2.4 + $0.5904 + $1.08 + $1.08 = $5.1504
 
 
 # Options considered to have Progressive Delivery with Istio
-- Option1 (the one implmented in this demo): Istio + ArgoCD + Argo Rollouts
+- Option1 (the one implemented in this demo): Istio + ArgoCD + Argo Rollouts
 - Option2: Istio + ArgoCD + Flagger
 - Option3: Istio + Flux + Flagger
 

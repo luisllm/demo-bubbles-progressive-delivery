@@ -327,7 +327,7 @@ jobs:
 
       - name: Deploy Argo Rollouts
         run: |
-          kubectl create namespace argo-rollouts
+          kubectl get namespace | grep -q "^argo-rollouts" || kubectl create namespace argo-rollouts
           kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
 
 
